@@ -12,11 +12,6 @@ declare module "http" {
   }
 }
 
-app.use((req, _res, next) => {
-  const routedPath = typeof req.query.__path === "string" ? req.query.__path : "";
-  if (routedPath) req.url = `/api/${routedPath}`;
-  next();
-});
 app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
 app.use(express.urlencoded({ extended: false }));
 
