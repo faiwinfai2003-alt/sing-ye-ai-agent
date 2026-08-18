@@ -1,7 +1,7 @@
 import type { Express, Request, Response } from "express";
 import { createServer } from "node:http";
 import type { Server } from "node:http";
-import { storage } from "./storage";
+import { storage } from "./storage-memory";
 
 const RETELL_BASE = "https://api.retellai.com";
 

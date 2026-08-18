@@ -12,20 +12,18 @@ declare module "http" {
   }
 }
 
-app.use(
-  express.json({
-    verify: (req, _res, buf) => {
-      req.rawBody = buf;
-    },
-  }),
-);
+app.use((req, _res, next) => {
+  const routedPath = typeof req.query.__path === "string" ? req.query.__path : "";
+  if (routedPath) req.url = `/api/${routedPath}`;
+  next();
+});
+app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
 app.use(express.urlencoded({ extended: false }));
 
 const ready = registerRoutes(httpServer, app).then(() => {
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     if (res.headersSent) return next(err);
-    const status = err.status || err.statusCode || 500;
-    return res.status(status).json({
+    return res.status(err.status || err.statusCode || 500).json({
       message: err.message || "Internal Server Error",
     });
   });
