@@ -1,5 +1,5 @@
 import { Link, useLocation } from "wouter";
-import { Moon, Sun, Settings as SettingsIcon } from "lucide-react";
+import { Moon, Sun, Settings as SettingsIcon, PhoneOutgoing } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/Logo";
 import { useTheme } from "@/lib/theme";
@@ -23,6 +23,17 @@ export function SiteHeader() {
         </Link>
 
         <nav className="flex items-center gap-1.5">
+          <Link href="/outbound" data-testid="link-outbound">
+            <Button
+              variant={location === "/outbound" ? "secondary" : "ghost"}
+              size="sm"
+              className="gap-1.5"
+              data-testid="button-nav-outbound"
+            >
+              <PhoneOutgoing className="h-4 w-4" />
+              <span className="hidden sm:inline">外撥中心</span>
+            </Button>
+          </Link>
           <Link href="/settings" data-testid="link-settings">
             <Button
               variant={location === "/settings" ? "secondary" : "ghost"}

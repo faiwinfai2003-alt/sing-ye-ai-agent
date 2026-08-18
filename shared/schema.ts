@@ -37,6 +37,29 @@ export const settings = sqliteTable("settings", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   retellApiKey: text("retell_api_key"),
   adminPasscode: text("admin_passcode").notNull().default("888888"),
+  outboundFromNumber: text("outbound_from_number"),
+  renewalPersonaId: integer("renewal_persona_id"),
+  renewalScript: text("renewal_script"),
 });
 
 export type Settings = typeof settings.$inferSelect;
+
+export const callLogs = sqliteTable("call_logs", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  retellCallId: text("retell_call_id").unique(),
+  customerName: text("customer_name").notNull(),
+  customerPhone: text("customer_phone").notNull(),
+  expiryDate: text("expiry_date").notNull(),
+  monthlyFee: text("monthly_fee").notNull(),
+  personaId: integer("persona_id").notNull(),
+  status: text("status").notNull().default("queued"),
+  outcome: text("outcome").notNull().default("準備撥出"),
+  disconnectionReason: text("disconnection_reason"),
+  transcript: text("transcript"),
+  recordingUrl: text("recording_url"),
+  durationMs: integer("duration_ms"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export type CallLog = typeof callLogs.$inferSelect;

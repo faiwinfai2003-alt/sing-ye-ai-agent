@@ -1,5 +1,5 @@
-import { personas, settings } from "@shared/schema";
-import type { Persona, InsertPersona, Settings } from "@shared/schema";
+import { personas, settings, callLogs } from "@shared/schema";
+import type { Persona, InsertPersona, Settings, CallLog } from "@shared/schema";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import { eq } from "drizzle-orm";
@@ -35,9 +35,59 @@ CREATE TABLE IF NOT EXISTS personas (
 CREATE TABLE IF NOT EXISTS settings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   retell_api_key TEXT,
-  admin_passcode TEXT NOT NULL DEFAULT '888888'
+  admin_passcode TEXT NOT NULL DEFAULT '888888',
+  outbound_from_number TEXT,
+  renewal_persona_id INTEGER,
+  renewal_script TEXT
+);
+CREATE TABLE IF NOT EXISTS call_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  retell_call_id TEXT UNIQUE,
+  customer_name TEXT NOT NULL,
+  customer_phone TEXT NOT NULL,
+  expiry_date TEXT NOT NULL,
+  monthly_fee TEXT NOT NULL,
+  persona_id INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued',
+  outcome TEXT NOT NULL DEFAULT '準備撥出',
+  disconnection_reason TEXT,
+  transcript TEXT,
+  recording_url TEXT,
+  duration_ms INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 `);
+
+const settingsColumns = sqlite.prepare("PRAGMA table_info(settings)").all() as { name: string }[];
+const settingsColumnNames = new Set(settingsColumns.map((column) => column.name));
+if (!settingsColumnNames.has("outbound_from_number")) {
+  sqlite.exec("ALTER TABLE settings ADD COLUMN outbound_from_number TEXT");
+}
+if (!settingsColumnNames.has("renewal_persona_id")) {
+  sqlite.exec("ALTER TABLE settings ADD COLUMN renewal_persona_id INTEGER");
+}
+if (!settingsColumnNames.has("renewal_script")) {
+  sqlite.exec("ALTER TABLE settings ADD COLUMN renewal_script TEXT");
+}
+
+export const DEFAULT_RENEWAL_SCRIPT = `你係一位有禮貌、專業而自然嘅廣東話續費客服。呢次係由系統主動致電客戶。
+
+客戶資料:
+- 客戶稱呼: {{customer_name}}
+- 服務到期日: {{expiry_date}}
+- 每月月費: {{monthly_fee}}
+
+對話流程:
+1. 先清楚講出自己係 AI 客服,代表服務團隊致電,再確認而家方唔方便傾兩分鐘。
+2. 提醒客戶服務會喺 {{expiry_date}} 到期,續用月費係 {{monthly_fee}}。
+3. 問客戶想繼續服務、需要時間考慮,定係取消服務。
+4. 如果客戶想續用,確認意向,話會由同事安排付款或續期跟進；唔好要求客戶喺電話講信用卡、密碼或驗證碼。
+5. 如果客戶想取消,禮貌確認「我哋會幫你安排取消服務」,並話會由同事跟進；唔好阻撓、施壓或虛構罰款。
+6. 如果客戶唔方便、拒絕對話或要求唔再致電,立即道歉並結束通話。
+7. 未能確認嘅收費、退款或合約條款,唔可以自行承諾,要轉交人工客服。
+
+全程使用自然廣東話口語,每次回答簡短,等客戶講完先回應。`;
 
 const SEED_PERSONAS: InsertPersona[] = [
   {
@@ -136,7 +186,18 @@ function seedIfEmpty() {
   }
   const settingsCount = sqlite.prepare("SELECT COUNT(*) as c FROM settings").get() as { c: number };
   if (settingsCount.c === 0) {
-    db.insert(settings).values({ adminPasscode: "888888" }).run();
+    db.insert(settings).values({
+      adminPasscode: "888888",
+      renewalPersonaId: 2,
+      renewalScript: DEFAULT_RENEWAL_SCRIPT,
+    }).run();
+  } else {
+    sqlite.prepare(`
+      UPDATE settings
+      SET renewal_persona_id = COALESCE(renewal_persona_id, 2),
+          renewal_script = COALESCE(renewal_script, ?)
+      WHERE id = 1
+    `).run(DEFAULT_RENEWAL_SCRIPT);
   }
 }
 seedIfEmpty();
@@ -149,6 +210,21 @@ export interface IStorage {
   getSettings(): Promise<Settings>;
   setApiKey(apiKey: string | null): Promise<Settings>;
   setPasscode(passcode: string): Promise<Settings>;
+  updateOutboundSettings(patch: {
+    outboundFromNumber?: string | null;
+    renewalPersonaId?: number;
+    renewalScript?: string;
+  }): Promise<Settings>;
+  createCallLog(input: {
+    customerName: string;
+    customerPhone: string;
+    expiryDate: string;
+    monthlyFee: string;
+    personaId: number;
+  }): Promise<CallLog>;
+  updateCallLog(id: number, patch: Partial<CallLog>): Promise<CallLog | undefined>;
+  listCallLogs(): Promise<CallLog[]>;
+  getCallLog(id: number): Promise<CallLog | undefined>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -185,6 +261,46 @@ export class DatabaseStorage implements IStorage {
     await this.getSettings();
     db.update(settings).set({ adminPasscode: passcode }).where(eq(settings.id, 1)).run();
     return this.getSettings();
+  }
+
+  async updateOutboundSettings(patch: {
+    outboundFromNumber?: string | null;
+    renewalPersonaId?: number;
+    renewalScript?: string;
+  }): Promise<Settings> {
+    await this.getSettings();
+    db.update(settings).set(patch).where(eq(settings.id, 1)).run();
+    return this.getSettings();
+  }
+
+  async createCallLog(input: {
+    customerName: string;
+    customerPhone: string;
+    expiryDate: string;
+    monthlyFee: string;
+    personaId: number;
+  }): Promise<CallLog> {
+    const now = new Date().toISOString();
+    return db.insert(callLogs).values({
+      ...input,
+      status: "queued",
+      outcome: "準備撥出",
+      createdAt: now,
+      updatedAt: now,
+    }).returning().get();
+  }
+
+  async updateCallLog(id: number, patch: Partial<CallLog>): Promise<CallLog | undefined> {
+    db.update(callLogs).set({ ...patch, updatedAt: new Date().toISOString() }).where(eq(callLogs.id, id)).run();
+    return this.getCallLog(id);
+  }
+
+  async listCallLogs(): Promise<CallLog[]> {
+    return db.select().from(callLogs).orderBy(callLogs.id).all().reverse();
+  }
+
+  async getCallLog(id: number): Promise<CallLog | undefined> {
+    return db.select().from(callLogs).where(eq(callLogs.id, id)).get();
   }
 }
 

@@ -9,12 +9,14 @@ import { SiteHeader } from "@/components/SiteHeader";
 import NotFound from "@/pages/not-found";
 import Home from "@/pages/home";
 import Settings from "@/pages/settings";
+import Outbound from "@/pages/outbound";
 
 function AppRouter() {
   return (
     <Switch>
       <Route path="/" component={Home} />
       <Route path="/settings" component={Settings} />
+      <Route path="/outbound" component={Outbound} />
       <Route component={NotFound} />
     </Switch>
   );

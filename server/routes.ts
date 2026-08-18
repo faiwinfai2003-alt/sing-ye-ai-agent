@@ -37,9 +37,68 @@ async function requirePasscode(req: Request, res: Response): Promise<boolean> {
 function buildGeneralPrompt(name: string, systemPrompt: string) {
   return `${systemPrompt}
 
+【外撥續費模式指示】
+如果 call_mode 係 outbound_renewal,你要優先跟從以下續費腳本,並使用系統提供嘅客戶資料自然對答:
+客戶稱呼: {{customer_name}}
+服務到期日: {{expiry_date}}
+每月月費: {{monthly_fee}}
+{{renewal_script}}
+
 【朗讀模式指示】
 如果系統提供咗一個叫 preview_text 嘅動態變數,而且內容唔係空白,你嘅唯一任務就係一字不漏、用自然嘅廣東話語調讀出 {{preview_text}} 嘅內容,讀完之後有禮貌咁講一句「多謝收聽,再見」,然後結束通話。唔好加任何解釋或者評論。
 如果 preview_text 係空白,即係代表呢個係普通對話通話,你就用返你「${name}」呢個角色嘅性格,主動打招呼、自我介紹,然後同用戶正常對話。`;
+}
+
+function buildLlmBody(name: string, systemPrompt: string) {
+  return {
+    general_prompt: buildGeneralPrompt(name, systemPrompt),
+    begin_message: null,
+    default_dynamic_variables: {
+      preview_text: "",
+      call_mode: "",
+      renewal_script: "",
+      customer_name: "客戶",
+      expiry_date: "稍後確認",
+      monthly_fee: "稍後確認",
+    },
+    general_tools: [
+      {
+        type: "end_call",
+        name: "end_call",
+        description: "當用戶想結束通話、拒絕繼續、要求唔再致電,或者已經完成對話時,有禮貌咁結束通話。",
+      },
+    ],
+  };
+}
+
+function getCallOutcome(call: any) {
+  const status = (call?.call_status || call?.status || "unknown").toString();
+  const reason = (call?.disconnection_reason || call?.end_reason || "").toString();
+  const combined = `${status} ${reason}`.toLowerCase();
+  if (combined.includes("no_answer") || combined.includes("no-answer")) return "無人接聽";
+  if (combined.includes("busy")) return "忙線";
+  if (combined.includes("voicemail") || combined.includes("machine")) return "留言信箱/自動應答";
+  if (combined.includes("failed") || combined.includes("error")) return "撥號失敗";
+  if (status === "ongoing") return "通話中";
+  if (status === "registered" || status === "queued") return "撥號中";
+  if (status === "ended") return "通話已結束";
+  return status === "unknown" ? "等待更新" : status;
+}
+
+function toDynamicVariables(input: {
+  renewalScript: string;
+  customerName: string;
+  expiryDate: string;
+  monthlyFee: string;
+}) {
+  return {
+    call_mode: "outbound_renewal",
+    renewal_script: input.renewalScript,
+    customer_name: input.customerName,
+    expiry_date: input.expiryDate,
+    monthly_fee: input.monthlyFee,
+    preview_text: "",
+  };
 }
 
 export async function registerRoutes(
@@ -142,19 +201,7 @@ export async function registerRoutes(
     const settings = await storage.getSettings();
     if (settings.retellApiKey && voiceId) {
       const promptToUse = systemPrompt || persona.systemPrompt;
-      const generalPrompt = buildGeneralPrompt(persona.name, promptToUse);
-      const llmBody = {
-        general_prompt: generalPrompt,
-        begin_message: null,
-        default_dynamic_variables: { preview_text: "" },
-        general_tools: [
-          {
-            type: "end_call",
-            name: "end_call",
-            description: "當用戶想結束通話,或者已經讀完朗讀內容時,結束呢次通話。",
-          },
-        ],
-      };
+      const llmBody = buildLlmBody(persona.name, promptToUse);
 
       let llmId = persona.retellLlmId;
       if (llmId) {
@@ -200,6 +247,178 @@ export async function registerRoutes(
 
     const updated = await storage.updatePersona(id, patch);
     res.json(updated);
+  });
+
+  app.post("/api/settings/outbound", async (req, res) => {
+    if (!(await requirePasscode(req, res))) return;
+    const fromNumber = (req.body?.outboundFromNumber || "").toString().trim();
+    const renewalPersonaId = Number(req.body?.renewalPersonaId);
+    const renewalScript = (req.body?.renewalScript || "").toString().trim();
+    if (fromNumber && !/^\+[1-9]\d{7,14}$/.test(fromNumber)) {
+      return res.status(400).json({ message: "外撥號碼必須使用 E.164 格式,例如 +85212345678。" });
+    }
+    if (!renewalPersonaId || !renewalScript) {
+      return res.status(400).json({ message: "請選擇 Agent 並填寫續費對答腳本。" });
+    }
+    const persona = await storage.getPersona(renewalPersonaId);
+    if (!persona?.retellLlmId) {
+      return res.status(400).json({ message: "所選 Agent 尚未完成 Retell 設定。" });
+    }
+    const current = await storage.getSettings();
+    if (!current.retellApiKey) {
+      return res.status(400).json({ message: "尚未設定 Retell API Key。" });
+    }
+    const update = await retellFetch(current.retellApiKey, `/update-retell-llm/${persona.retellLlmId}`, {
+      method: "PATCH",
+      body: JSON.stringify(buildLlmBody(persona.name, persona.systemPrompt)),
+    });
+    if (!update.ok) {
+      return res.status(update.status).json({ message: "更新 Retell 對答設定失敗。", detail: update.json });
+    }
+    await storage.updateOutboundSettings({
+      outboundFromNumber: fromNumber || null,
+      renewalPersonaId,
+      renewalScript,
+    });
+    res.json({ ok: true });
+  });
+
+  app.post("/api/settings/outbound/config", async (req, res) => {
+    if (!(await requirePasscode(req, res))) return;
+    const current = await storage.getSettings();
+    res.json({
+      outboundFromNumber: current.outboundFromNumber || "",
+      renewalPersonaId: current.renewalPersonaId || 2,
+      renewalScript: current.renewalScript || "",
+    });
+  });
+
+  app.post("/api/settings/phone-numbers", async (req, res) => {
+    if (!(await requirePasscode(req, res))) return;
+    const current = await storage.getSettings();
+    if (!current.retellApiKey) return res.status(400).json({ message: "尚未設定 Retell API Key。" });
+    const result = await retellFetch(current.retellApiKey, "/v2/list-phone-numbers?limit=100");
+    if (!result.ok) {
+      return res.status(result.status).json({ message: "取得 Retell 電話號碼失敗。", detail: result.json });
+    }
+    const numbers = Array.isArray(result.json)
+      ? result.json
+      : result.json?.phone_numbers || result.json?.data || [];
+    res.json(numbers);
+  });
+
+  // ---------- Renewal outbound calling ----------
+
+  app.post("/api/outbound/test-web-call", async (req, res) => {
+    if (!(await requirePasscode(req, res))) return;
+    const current = await storage.getSettings();
+    const persona = await storage.getPersona(Number(current.renewalPersonaId || 2));
+    if (!current.retellApiKey || !persona?.retellAgentId || !current.renewalScript) {
+      return res.status(400).json({ message: "請先完成 Retell Agent 同續費腳本設定。" });
+    }
+    const customerName = (req.body?.customerName || "陳先生").toString().trim();
+    const expiryDate = (req.body?.expiryDate || "今個月底").toString().trim();
+    const monthlyFee = (req.body?.monthlyFee || "港幣一百元").toString().trim();
+    const result = await retellFetch(current.retellApiKey, "/v2/create-web-call", {
+      method: "POST",
+      body: JSON.stringify({
+        agent_id: persona.retellAgentId,
+        retell_llm_dynamic_variables: toDynamicVariables({
+          renewalScript: current.renewalScript,
+          customerName,
+          expiryDate,
+          monthlyFee,
+        }),
+      }),
+    });
+    if (!result.ok) {
+      return res.status(result.status).json({ message: "建立續費對話測試失敗。", detail: result.json });
+    }
+    res.json({ mode: "live", accessToken: result.json.access_token, callId: result.json.call_id });
+  });
+
+  app.post("/api/outbound/call", async (req, res) => {
+    if (!(await requirePasscode(req, res))) return;
+    const current = await storage.getSettings();
+    const persona = await storage.getPersona(Number(current.renewalPersonaId || 2));
+    if (!current.retellApiKey || !persona?.retellAgentId || !current.renewalScript) {
+      return res.status(400).json({ message: "請先完成 Retell Agent 同續費腳本設定。" });
+    }
+    if (!current.outboundFromNumber) {
+      return res.status(400).json({ message: "請先喺 Settings 揀選 Retell 外撥號碼。" });
+    }
+    const customerName = (req.body?.customerName || "").toString().trim();
+    const customerPhone = (req.body?.customerPhone || "").toString().trim();
+    const expiryDate = (req.body?.expiryDate || "").toString().trim();
+    const monthlyFee = (req.body?.monthlyFee || "").toString().trim();
+    if (!customerName || !expiryDate || !monthlyFee || !/^\+[1-9]\d{7,14}$/.test(customerPhone)) {
+      return res.status(400).json({ message: "請填齊客戶資料,電話要使用 E.164 格式。" });
+    }
+
+    const log = await storage.createCallLog({
+      customerName,
+      customerPhone,
+      expiryDate,
+      monthlyFee,
+      personaId: persona.id,
+    });
+    const result = await retellFetch(current.retellApiKey, "/v2/create-phone-call", {
+      method: "POST",
+      body: JSON.stringify({
+        from_number: current.outboundFromNumber,
+        to_number: customerPhone,
+        override_agent_id: persona.retellAgentId,
+        metadata: { local_call_log_id: String(log.id), purpose: "service_renewal" },
+        retell_llm_dynamic_variables: toDynamicVariables({
+          renewalScript: current.renewalScript,
+          customerName,
+          expiryDate,
+          monthlyFee,
+        }),
+      }),
+    });
+    if (!result.ok) {
+      await storage.updateCallLog(log.id, {
+        status: "error",
+        outcome: "撥號失敗",
+        disconnectionReason: JSON.stringify(result.json || {}),
+      });
+      return res.status(result.status).json({ message: "Retell 外撥失敗。", detail: result.json });
+    }
+    const updated = await storage.updateCallLog(log.id, {
+      retellCallId: result.json.call_id,
+      status: result.json.call_status || "registered",
+      outcome: getCallOutcome(result.json),
+    });
+    res.status(201).json(updated);
+  });
+
+  app.post("/api/outbound/calls", async (req, res) => {
+    if (!(await requirePasscode(req, res))) return;
+    const current = await storage.getSettings();
+    let logs = await storage.listCallLogs();
+    if (current.retellApiKey) {
+      const active = logs.filter((log) =>
+        log.retellCallId && ["queued", "registered", "ongoing"].includes(log.status)
+      ).slice(0, 10);
+      await Promise.all(active.map(async (log) => {
+        const result = await retellFetch(current.retellApiKey!, `/v1/get-call/${log.retellCallId}`);
+        if (!result.ok) return;
+        const call = result.json || {};
+        const start = Number(call.start_timestamp || 0);
+        const end = Number(call.end_timestamp || 0);
+        await storage.updateCallLog(log.id, {
+          status: call.call_status || log.status,
+          outcome: getCallOutcome(call),
+          disconnectionReason: call.disconnection_reason || null,
+          transcript: call.transcript || null,
+          recordingUrl: call.recording_url || null,
+          durationMs: start && end ? Math.max(0, end - start) : null,
+        });
+      }));
+      logs = await storage.listCallLogs();
+    }
+    res.json(logs);
   });
 
   // ---------- Call + TTS preview ----------
