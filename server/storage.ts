@@ -3,8 +3,12 @@ import type { Persona, InsertPersona, Settings, CallLog } from "@shared/schema";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import { eq } from "drizzle-orm";
+import path from "node:path";
 
-const sqlite = new Database("data.db");
+const databasePath =
+  process.env.DATABASE_PATH ||
+  (process.env.VERCEL ? path.join("/tmp", "cantonese-voice-agent.db") : "data.db");
+const sqlite = new Database(databasePath);
 sqlite.pragma("journal_mode = WAL");
 
 export const db = drizzle(sqlite);
