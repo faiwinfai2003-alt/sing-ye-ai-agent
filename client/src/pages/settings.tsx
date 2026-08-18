@@ -28,6 +28,14 @@ export default function Settings() {
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [newPasscode, setNewPasscode] = useState("");
   const [voices, setVoices] = useState<RetellVoice[]>([]);
+  // Retell's Cantonese (yue-CN) TTS is only reliable on the "platform" and
+  // "minimax" voice providers today — surface those first so they're easy
+  // to find in a long voice list.
+  const sortedVoices = [...voices].sort((a, b) => {
+    const aYue = a.provider === "platform" || a.provider === "minimax" ? 0 : 1;
+    const bYue = b.provider === "platform" || b.provider === "minimax" ? 0 : 1;
+    return aYue - bYue;
+  });
   const [selectedVoiceByPersona, setSelectedVoiceByPersona] = useState<Record<number, string>>(
     {}
   );
@@ -224,6 +232,17 @@ export default function Settings() {
             ? `已載入 ${voices.length} 個 Retell 聲線,可以喺下面幫每位角色指派聲音。`
             : "先設定 API Key,再按重新整理載入 Retell 提供嘅聲線列表。"}
         </p>
+        {voices.length > 0 && (
+          <p className="mt-2 rounded-md bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-400">
+            廣東話(yue-CN)語音合成暫時只有 <strong>Retell Platform</strong> 同 <strong>MiniMax</strong>{" "}
+            兩個聲音供應商支援,其他供應商(ElevenLabs、OpenAI、Cartesia、Fish Audio)嘅聲線讀廣東話句子可能會唔準或變成其他語言。下面清單已將呢兩類聲線排前並標示
+            <Badge variant="secondary" className="ml-1 gap-1 align-middle">
+              <CheckCircle2 className="h-3 w-3" />
+              廣東話
+            </Badge>
+            ,建議優先揀選有標示嘅聲線。
+          </p>
+        )}
       </Card>
 
       <Card className="mt-6 p-5 sm:p-6" data-testid="card-personas">
@@ -260,15 +279,19 @@ export default function Settings() {
                   }
                   disabled={voices.length === 0}
                 >
-                  <SelectTrigger className="w-48" data-testid={`select-voice-${p.slug}`}>
+                  <SelectTrigger className="w-56" data-testid={`select-voice-${p.slug}`}>
                     <SelectValue placeholder="揀選聲線" />
                   </SelectTrigger>
                   <SelectContent>
-                    {voices.map((v) => (
-                      <SelectItem key={v.voice_id} value={v.voice_id}>
-                        {v.voice_name} ({v.gender || "?"})
-                      </SelectItem>
-                    ))}
+                    {sortedVoices.map((v) => {
+                      const isCantonese = v.provider === "platform" || v.provider === "minimax";
+                      return (
+                        <SelectItem key={v.voice_id} value={v.voice_id}>
+                          {isCantonese ? "\u2705 " : ""}
+                          {v.voice_name} ({v.gender || "?"} · {v.provider})
+                        </SelectItem>
+                      );
+                    })}
                   </SelectContent>
                 </Select>
                 <Button
